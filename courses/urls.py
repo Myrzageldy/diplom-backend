@@ -4,7 +4,8 @@ from .views import (
     CourseListView, CourseDetailView, CategoryListView,
 
     # Учитель - курсы
-    TeacherCoursesView, TeacherCourseDetailView, TeacherStatsView,
+    TeacherCoursesView, TeacherCourseDetailView, TeacherStatsView, CourseUploadImageView,
+    TeacherStudentsView,
 
     # Модули
     ModuleListView, ModuleDetailView, ModuleReorderView,
@@ -17,6 +18,9 @@ from .views import (
 
     # Запись на курс
     EnrollCourseView, StudentEnrollmentsView,
+
+    # Платежи
+    PaymentInitView, PaymentConfirmView, PaymentStatusView,
 
     # Прогресс
     LessonCompleteView, CourseProgressView,
@@ -43,7 +47,9 @@ urlpatterns = [
     # УЧИТЕЛЬ - КУРСЫ
     # ============================================================
     path('my/', TeacherCoursesView.as_view(), name='teacher-courses'),
+    path('my/students/', TeacherStudentsView.as_view(), name='teacher-students'),
     path('my/<int:pk>/', TeacherCourseDetailView.as_view(), name='teacher-course-detail'),
+    path('my/<int:pk>/upload-image/', CourseUploadImageView.as_view(), name='course-upload-image'),
     path('stats/', TeacherStatsView.as_view(), name='teacher-stats'),
 
     # ============================================================
@@ -73,6 +79,13 @@ urlpatterns = [
     # ============================================================
     path('<int:pk>/enroll/', EnrollCourseView.as_view(), name='course-enroll'),
     path('enrolled/', StudentEnrollmentsView.as_view(), name='student-enrollments'),
+
+    # ============================================================
+    # ПЛАТЕЖИ
+    # ============================================================
+    path('<int:pk>/payment/init/', PaymentInitView.as_view(), name='payment-init'),
+    path('payment/<uuid:payment_id>/confirm/', PaymentConfirmView.as_view(), name='payment-confirm'),
+    path('payment/<uuid:payment_id>/status/', PaymentStatusView.as_view(), name='payment-status'),
 
     # ============================================================
     # ПРОГРЕСС И ОБУЧЕНИЕ

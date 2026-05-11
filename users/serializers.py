@@ -117,8 +117,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'name', 'role', 'date_joined']
-        read_only_fields = ['id', 'email', 'role', 'date_joined']
+        fields = ['id', 'email', 'name', 'role', 'date_joined', 'totp_enabled']
+        read_only_fields = ['id', 'email', 'role', 'date_joined', 'totp_enabled']
 
 
 class SendCodeSerializer(serializers.Serializer):

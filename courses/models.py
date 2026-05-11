@@ -47,6 +47,13 @@ class Course(models.Model):
         null=True,
         verbose_name='Обложка'
     )
+    category_name = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True,
+        verbose_name='Название категории (кастомное)',
+        help_text='Используется когда учитель выбирает "Другое" и пишет свою категорию'
+    )
     is_published = models.BooleanField(default=False, verbose_name='Опубликован')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Дата обновления')
@@ -78,6 +85,50 @@ class Course(models.Model):
         if reviews:
             return round(sum(r.rating for r in reviews) / len(reviews), 1)
         return 0
+
+
+class Payment(models.Model):
+    """Платёж за курс"""
+    STATUS_PENDING = 'pending'
+    STATUS_PAID = 'paid'
+    STATUS_FAILED = 'failed'
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Ожидает оплаты'),
+        (STATUS_PAID, 'Оплачен'),
+        (STATUS_FAILED, 'Отклонён'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    student = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='payments',
+        verbose_name='Студент'
+    )
+    course = models.ForeignKey(
+        Course,
+        on_delete=models.CASCADE,
+        related_name='payments',
+        verbose_name='Курс'
+    )
+    amount = models.DecimalField(max_digits=10, decimal_places=2, verbose_name='Сумма')
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+        verbose_name='Статус'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
+    paid_at = models.DateTimeField(null=True, blank=True, verbose_name='Дата оплаты')
+
+    class Meta:
+        verbose_name = 'Платёж'
+        verbose_name_plural = 'Платежи'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.student.name} — {self.course.title} — {self.status}'
 
 
 class Enrollment(models.Model):

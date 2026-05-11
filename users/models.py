@@ -14,6 +14,7 @@ from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, Permis
 from django.db import models
 import random
 import string
+import uuid
 from django.utils import timezone
 from datetime import timedelta
 
@@ -83,6 +84,14 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)   # Доступ в админку
     date_joined = models.DateTimeField(auto_now_add=True)  # Дата регистрации
 
+    # Двухфакторная аутентификация (TOTP)
+    totp_secret = models.CharField(max_length=64, blank=True, default='', verbose_name='TOTP секрет')
+    totp_enabled = models.BooleanField(default=False, verbose_name='2FA включена')
+
+    # Защита от перебора паролей
+    login_attempts = models.PositiveSmallIntegerField(default=0, verbose_name='Неудачные попытки входа')
+    locked_until = models.DateTimeField(null=True, blank=True, verbose_name='Заблокирован до')
+
     # Указываем что для входа используется email (не username)
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['name']  # Обязательные поля при создании через CLI
@@ -96,6 +105,29 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+    def is_locked(self) -> bool:
+        """Проверяет, заблокирован ли аккаунт в данный момент"""
+        if self.locked_until and timezone.now() < self.locked_until:
+            return True
+        return False
+
+    def record_failed_login(self):
+        """
+        Увеличивает счётчик неудачных попыток.
+        При достижении 5 — блокирует аккаунт на 15 минут.
+        """
+        self.login_attempts += 1
+        if self.login_attempts >= 5:
+            self.locked_until = timezone.now() + timedelta(minutes=15)
+        self.save(update_fields=['login_attempts', 'locked_until'])
+
+    def reset_login_attempts(self):
+        """Сбрасывает счётчик после успешного входа"""
+        if self.login_attempts > 0 or self.locked_until:
+            self.login_attempts = 0
+            self.locked_until = None
+            self.save(update_fields=['login_attempts', 'locked_until'])
 
 
 class EmailVerification(models.Model):
@@ -134,3 +166,32 @@ class EmailVerification(models.Model):
     def is_expired(self):
         """Проверяет истёк ли код (10 минут)"""
         return timezone.now() > self.created_at + timedelta(minutes=10)
+
+
+class PasswordResetToken(models.Model):
+    """
+    Токен для сброса пароля.
+
+    Когда пользователь нажимает «Забыл пароль», генерируется UUID-токен.
+    Ссылка со токеном отправляется на email. Токен действителен 1 час.
+    После использования токен удаляется.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='password_reset_tokens',
+        verbose_name='Пользователь'
+    )
+    token = models.UUIDField(default=uuid.uuid4, unique=True, verbose_name='Токен')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Токен сброса пароля'
+        verbose_name_plural = 'Токены сброса пароля'
+
+    def __str__(self):
+        return f'{self.user.email} - {self.token}'
+
+    def is_expired(self):
+        """Токен действителен 1 час"""
+        return timezone.now() > self.created_at + timedelta(hours=1)

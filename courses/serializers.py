@@ -20,12 +20,29 @@ class CategorySerializer(serializers.ModelSerializer):
 # КУРСЫ
 # ============================================================
 
+def get_course_image(obj, context):
+    """Возвращает image как есть если это внешний URL, иначе строит абсолютный media URL."""
+    if not obj.image:
+        return None
+    val = str(obj.image)
+    if val.startswith('http'):
+        return val
+    request = context.get('request')
+    if request:
+        return request.build_absolute_uri(obj.image.url)
+    return obj.image.url
+
+
 class CourseListSerializer(serializers.ModelSerializer):
     """Сериализатор для списка курсов"""
+    image = serializers.SerializerMethodField()
     teacher_name = serializers.CharField(source='teacher.name', read_only=True)
-    category_name = serializers.CharField(source='category.name', read_only=True)
+    category_name = serializers.SerializerMethodField()
     students_count = serializers.SerializerMethodField()
     rating = serializers.SerializerMethodField()
+
+    def get_image(self, obj):
+        return get_course_image(obj, self.context)
 
     class Meta:
         model = Course
@@ -34,6 +51,15 @@ class CourseListSerializer(serializers.ModelSerializer):
             'teacher_name', 'category_name', 'students_count', 'rating',
             'is_published', 'created_at'
         ]
+
+    def get_category_name(self, obj):
+        # Сначала проверяем кастомное название категории
+        if obj.category_name:
+            return obj.category_name
+        # Иначе возвращаем название из связанной категории
+        if obj.category:
+            return obj.category.name
+        return None
 
     def get_students_count(self, obj):
         return obj.students_count  # Uses @property
@@ -46,20 +72,32 @@ class CourseListSerializer(serializers.ModelSerializer):
 
 class CourseDetailSerializer(serializers.ModelSerializer):
     """Сериализатор для детальной информации о курсе"""
+    image = serializers.SerializerMethodField()
     teacher = UserSerializer(read_only=True)
     category = CategorySerializer(read_only=True)
     students_count = serializers.SerializerMethodField()
     rating = serializers.SerializerMethodField()
     modules_count = serializers.SerializerMethodField()
+    category_name = serializers.SerializerMethodField()
+
+    def get_image(self, obj):
+        return get_course_image(obj, self.context)
 
     class Meta:
         model = Course
         fields = [
             'id', 'title', 'description', 'price', 'image',
-            'teacher', 'category', 'students_count', 'rating',
+            'teacher', 'category', 'category_name', 'students_count', 'rating',
             'is_published', 'enable_certificate', 'modules_count',
             'created_at', 'updated_at'
         ]
+
+    def get_category_name(self, obj):
+        if obj.category_name:
+            return obj.category_name
+        if obj.category:
+            return obj.category.name
+        return None
 
     def get_students_count(self, obj):
         return obj.students_count
@@ -75,17 +113,29 @@ class CourseDetailSerializer(serializers.ModelSerializer):
 
 class TeacherCourseSerializer(serializers.ModelSerializer):
     """Сериализатор для курсов преподавателя"""
+    image = serializers.SerializerMethodField()
     students_count = serializers.SerializerMethodField()
     rating = serializers.SerializerMethodField()
     modules_count = serializers.SerializerMethodField()
+    category_name = serializers.SerializerMethodField()
+
+    def get_image(self, obj):
+        return get_course_image(obj, self.context)
 
     class Meta:
         model = Course
         fields = [
             'id', 'title', 'description', 'price', 'image',
             'is_published', 'students_count', 'rating', 'modules_count',
-            'enable_certificate', 'created_at'
+            'enable_certificate', 'category_name', 'created_at'
         ]
+
+    def get_category_name(self, obj):
+        if obj.category_name:
+            return obj.category_name
+        if obj.category:
+            return obj.category.name
+        return None
 
     def get_students_count(self, obj):
         return obj.students_count
@@ -101,13 +151,18 @@ class TeacherCourseSerializer(serializers.ModelSerializer):
 
 class CourseCreateSerializer(serializers.ModelSerializer):
     """Сериализатор для создания/редактирования курса"""
+    image = serializers.SerializerMethodField()
+
+    def get_image(self, obj):
+        return get_course_image(obj, self.context)
     category_id = serializers.IntegerField(required=False, allow_null=True)
+    category_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = Course
         fields = [
             'id', 'title', 'description', 'price', 'image',
-            'category_id', 'is_published', 'enable_certificate', 'certificate_title'
+            'category_id', 'category_name', 'is_published', 'enable_certificate', 'certificate_title'
         ]
 
     def create(self, validated_data):

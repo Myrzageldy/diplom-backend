@@ -6,12 +6,13 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Count, Avg
 from django.shortcuts import get_object_or_404
 
+from django.utils import timezone
 from .models import (
     Course, Category, Enrollment, Review,
     Module, Lesson, LessonMaterial,
     Test, Question, Answer,
     LessonProgress, TestAttempt, TestAnswer,
-    Certificate
+    Certificate, Payment
 )
 from .serializers import (
     CourseListSerializer, CourseDetailSerializer,
@@ -233,6 +234,46 @@ class TeacherStatsView(APIView):
             'published_count': courses.filter(is_published=True).count(),
             'students_count': total_students,
         })
+
+
+class CourseUploadImageView(APIView):
+    """
+    POST /api/courses/my/<id>/upload-image/
+    Загрузка обложки курса.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, pk):
+        if request.user.role != 'teacher':
+            return Response(
+                {'detail': 'Только для преподавателей'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            course = Course.objects.get(pk=pk, teacher=request.user)
+        except Course.DoesNotExist:
+            return Response(
+                {'detail': 'Курс не найден'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        image = request.FILES.get('image')
+        if not image:
+            return Response(
+                {'detail': 'Изображение не предоставлено'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Удаляем старое изображение если есть
+        if course.image:
+            course.image.delete(save=False)
+
+        course.image = image
+        course.save()
+
+        return Response(TeacherCourseSerializer(course).data)
 
 
 # ============================================================
@@ -1155,14 +1196,233 @@ class StudentLessonView(APIView):
         data = serializer.data
         data['is_completed'] = progress.is_completed if progress else False
 
-        # Добавляем навигацию (пред/след урок)
-        module = lesson.module
-        lessons = list(module.lessons.filter(is_published=True).order_by('order'))
-        current_index = next(
-            (i for i, l in enumerate(lessons) if l.id == lesson.id), 0
+        # Добавляем навигацию (пред/след урок) - по всем модулям курса
+        all_lessons = list(
+            Lesson.objects.filter(
+                module__course=course,
+                module__is_published=True,
+                is_published=True
+            ).order_by('module__order', 'order')
         )
 
-        data['prev_lesson'] = lessons[current_index - 1].id if current_index > 0 else None
-        data['next_lesson'] = lessons[current_index + 1].id if current_index < len(lessons) - 1 else None
+        lesson_ids = [l.id for l in all_lessons]
+        try:
+            current_index = lesson_ids.index(lesson.id)
+            data['prev_lesson'] = lesson_ids[current_index - 1] if current_index > 0 else None
+            data['next_lesson'] = lesson_ids[current_index + 1] if current_index < len(lesson_ids) - 1 else None
+        except ValueError:
+            data['prev_lesson'] = None
+            data['next_lesson'] = None
 
         return Response(data)
+
+
+# ============================================================
+# УЧЕНИКИ УЧИТЕЛЯ
+# ============================================================
+
+class TeacherStudentsView(APIView):
+    """
+    GET /api/courses/my/students/
+    Получить список учеников учителя с прогрессом
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role != 'teacher':
+            return Response(
+                {'detail': 'Только для преподавателей'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Получаем курсы учителя
+        teacher_courses = Course.objects.filter(teacher=request.user)
+
+        # Фильтр по курсу
+        course_id = request.query_params.get('course_id')
+        if course_id:
+            teacher_courses = teacher_courses.filter(id=course_id)
+
+        # Получаем все записи на курсы учителя
+        enrollments = Enrollment.objects.filter(
+            course__in=teacher_courses
+        ).select_related('student', 'course')
+
+        students_data = []
+        unique_students = set()
+
+        for enrollment in enrollments:
+            student = enrollment.student
+            course = enrollment.course
+            unique_students.add(student.id)
+
+            # Считаем прогресс
+            total_lessons = Lesson.objects.filter(
+                module__course=course,
+                module__is_published=True,
+                is_published=True
+            ).count()
+
+            completed_lessons = LessonProgress.objects.filter(
+                student=student,
+                lesson__module__course=course,
+                is_completed=True
+            ).count()
+
+            progress_percent = round((completed_lessons / total_lessons * 100)) if total_lessons > 0 else 0
+
+            # Считаем тесты
+            tests = Test.objects.filter(module__course=course, is_published=True)
+            tests_total = tests.count()
+            tests_passed = 0
+            total_score = 0
+            score_count = 0
+
+            for test in tests:
+                best_attempt = TestAttempt.objects.filter(
+                    student=student,
+                    test=test
+                ).order_by('-score').first()
+
+                if best_attempt:
+                    if best_attempt.is_passed:
+                        tests_passed += 1
+                    total_score += best_attempt.score
+                    score_count += 1
+
+            average_score = round(total_score / score_count) if score_count > 0 else None
+
+            # Последняя активность
+            last_progress = LessonProgress.objects.filter(
+                student=student,
+                lesson__module__course=course
+            ).order_by('-completed_at').first()
+
+            last_attempt = TestAttempt.objects.filter(
+                student=student,
+                test__module__course=course
+            ).order_by('-finished_at').first()
+
+            last_activity = None
+            if last_progress and last_progress.completed_at:
+                last_activity = last_progress.completed_at
+            if last_attempt and last_attempt.finished_at:
+                if not last_activity or last_attempt.finished_at > last_activity:
+                    last_activity = last_attempt.finished_at
+
+            students_data.append({
+                'id': enrollment.id,
+                'student': {
+                    'id': student.id,
+                    'name': student.name,
+                    'email': student.email,
+                },
+                'course': {
+                    'id': course.id,
+                    'title': course.title,
+                },
+                'enrolled_at': enrollment.enrolled_at.isoformat(),
+                'progress_percent': progress_percent,
+                'completed_lessons': completed_lessons,
+                'total_lessons': total_lessons,
+                'last_activity': last_activity.isoformat() if last_activity else None,
+                'tests_passed': tests_passed,
+                'tests_total': tests_total,
+                'average_score': average_score,
+            })
+
+        return Response({
+            'students': students_data,
+            'total_students': len(unique_students),
+            'total_enrollments': len(students_data),
+        })
+
+
+# ============================================================
+# ПЛАТЕЖИ (Mock)
+# ============================================================
+
+class PaymentInitView(APIView):
+    """
+    POST /api/courses/<id>/payment/init/
+    Инициализация платежа за курс.
+    Для бесплатных курсов — сразу записывает.
+    Для платных — создаёт Payment(pending) и возвращает payment_id.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            course = Course.objects.get(pk=pk, is_published=True)
+        except Course.DoesNotExist:
+            return Response({'detail': 'Курс не найден'}, status=status.HTTP_404_NOT_FOUND)
+
+        if Enrollment.objects.filter(student=request.user, course=course).exists():
+            return Response({'detail': 'Вы уже записаны на этот курс'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Бесплатный курс — записываем сразу
+        if not course.price or course.price == 0:
+            Enrollment.objects.create(student=request.user, course=course)
+            return Response({'enrolled': True}, status=status.HTTP_201_CREATED)
+
+        # Платный курс — создаём платёж
+        payment = Payment.objects.create(
+            student=request.user,
+            course=course,
+            amount=course.price,
+        )
+        return Response({
+            'payment_id': str(payment.id),
+            'amount': float(payment.amount),
+            'course_title': course.title,
+        }, status=status.HTTP_201_CREATED)
+
+
+class PaymentConfirmView(APIView):
+    """
+    POST /api/courses/payment/<payment_id>/confirm/
+    Подтверждение оплаты (mock — симулирует успешную оплату).
+    Помечает Payment как paid и создаёт Enrollment.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, payment_id):
+        try:
+            payment = Payment.objects.get(id=payment_id, student=request.user)
+        except Payment.DoesNotExist:
+            return Response({'detail': 'Платёж не найден'}, status=status.HTTP_404_NOT_FOUND)
+
+        if payment.status == Payment.STATUS_PAID:
+            return Response({'detail': 'Уже оплачен'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if payment.status == Payment.STATUS_FAILED:
+            return Response({'detail': 'Платёж отклонён'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment.status = Payment.STATUS_PAID
+        payment.paid_at = timezone.now()
+        payment.save()
+
+        Enrollment.objects.get_or_create(student=request.user, course=payment.course)
+
+        return Response({'enrolled': True, 'course_id': payment.course_id})
+
+
+class PaymentStatusView(APIView):
+    """
+    GET /api/courses/payment/<payment_id>/status/
+    Статус платежа.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, payment_id):
+        try:
+            payment = Payment.objects.get(id=payment_id, student=request.user)
+        except Payment.DoesNotExist:
+            return Response({'detail': 'Платёж не найден'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            'status': payment.status,
+            'course_id': payment.course_id,
+            'amount': float(payment.amount),
+            'course_title': payment.course.title,
+        })
