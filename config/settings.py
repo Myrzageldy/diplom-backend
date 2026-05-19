@@ -134,6 +134,37 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ============================================
+# КЭШ — используется для хранения WebAuthn challenge
+# ============================================
+# В разработке: LocMemCache (в памяти процесса, не шарится между воркерами).
+# В production: заменить на Redis:
+#   pip install django-redis
+#   'BACKEND': 'django_redis.cache.RedisCache'
+#   'LOCATION': 'redis://127.0.0.1:6379/1'
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'eduplatform-webauthn-cache',
+    }
+}
+
+# ============================================
+# WEBAUTHN / PASSKEY НАСТРОЙКИ
+# ============================================
+# RP_ID — домен вашего сайта (без порта, без протокола).
+# В production: 'eduplatform.kz' или ваш реальный домен.
+# ВАЖНО: credential привязан к RP_ID! Если изменить — все ключи сломаются.
+WEBAUTHN_RP_ID = os.environ.get('WEBAUTHN_RP_ID', 'localhost')
+WEBAUTHN_RP_NAME = os.environ.get('WEBAUTHN_RP_NAME', 'EduPlatform KZ')
+
+# Origin — полный URL фронтенда (протокол + хост + порт)
+# Должен ТОЧНО совпадать с тем, откуда браузер делает запросы
+WEBAUTHN_ORIGIN = os.environ.get('WEBAUTHN_ORIGIN', 'http://localhost:3000')
+
+# Время жизни WebAuthn challenge в кэше (секунды)
+WEBAUTHN_CHALLENGE_TTL = 300  # 5 минут
+
+# ============================================
 # CORS — разрешаем запросы с фронтенда
 # ============================================
 CORS_ALLOWED_ORIGINS = [

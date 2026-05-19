@@ -1,322 +1,35 @@
-from rest_framework import serializers
+﻿from rest_framework import serializers
 from .models import (
-    Course, Category, Enrollment, Review,
-    Module, Lesson, LessonMaterial,
-    Test, Question, Answer,
-    LessonProgress, TestAttempt, TestAnswer,
-    Certificate
+    Category, Course, Module, Lesson, LessonMaterial, Enrollment,
+    LessonProgress, Test, Question, Answer, TestAttempt, TestAnswer,
+    Certificate, Payment, Review,
 )
-from users.serializers import UserSerializer
 
 
 class CategorySerializer(serializers.ModelSerializer):
-    """Сериализатор для категорий"""
     class Meta:
         model = Category
         fields = ['id', 'name', 'slug']
 
 
-# ============================================================
-# КУРСЫ
-# ============================================================
-
-def get_course_image(obj, context):
-    """Возвращает image как есть если это внешний URL, иначе строит абсолютный media URL."""
-    if not obj.image:
-        return None
-    val = str(obj.image)
-    if val.startswith('http'):
-        return val
-    request = context.get('request')
-    if request:
-        return request.build_absolute_uri(obj.image.url)
-    return obj.image.url
-
-
-class CourseListSerializer(serializers.ModelSerializer):
-    """Сериализатор для списка курсов"""
-    image = serializers.SerializerMethodField()
-    teacher_name = serializers.CharField(source='teacher.name', read_only=True)
-    category_name = serializers.SerializerMethodField()
-    students_count = serializers.SerializerMethodField()
-    rating = serializers.SerializerMethodField()
-
-    def get_image(self, obj):
-        return get_course_image(obj, self.context)
-
-    class Meta:
-        model = Course
-        fields = [
-            'id', 'title', 'description', 'price', 'image',
-            'teacher_name', 'category_name', 'students_count', 'rating',
-            'is_published', 'created_at'
-        ]
-
-    def get_category_name(self, obj):
-        # Сначала проверяем кастомное название категории
-        if obj.category_name:
-            return obj.category_name
-        # Иначе возвращаем название из связанной категории
-        if obj.category:
-            return obj.category.name
-        return None
-
-    def get_students_count(self, obj):
-        return obj.students_count  # Uses @property
-
-    def get_rating(self, obj):
-        from django.db.models import Avg
-        avg = obj.reviews.aggregate(Avg('rating'))['rating__avg']
-        return round(avg, 1) if avg else None
-
-
-class CourseDetailSerializer(serializers.ModelSerializer):
-    """Сериализатор для детальной информации о курсе"""
-    image = serializers.SerializerMethodField()
-    teacher = UserSerializer(read_only=True)
-    category = CategorySerializer(read_only=True)
-    students_count = serializers.SerializerMethodField()
-    rating = serializers.SerializerMethodField()
-    modules_count = serializers.SerializerMethodField()
-    category_name = serializers.SerializerMethodField()
-
-    def get_image(self, obj):
-        return get_course_image(obj, self.context)
-
-    class Meta:
-        model = Course
-        fields = [
-            'id', 'title', 'description', 'price', 'image',
-            'teacher', 'category', 'category_name', 'students_count', 'rating',
-            'is_published', 'enable_certificate', 'modules_count',
-            'created_at', 'updated_at'
-        ]
-
-    def get_category_name(self, obj):
-        if obj.category_name:
-            return obj.category_name
-        if obj.category:
-            return obj.category.name
-        return None
-
-    def get_students_count(self, obj):
-        return obj.students_count
-
-    def get_rating(self, obj):
-        from django.db.models import Avg
-        avg = obj.reviews.aggregate(Avg('rating'))['rating__avg']
-        return round(avg, 1) if avg else None
-
-    def get_modules_count(self, obj):
-        return obj.modules.filter(is_published=True).count()
-
-
-class TeacherCourseSerializer(serializers.ModelSerializer):
-    """Сериализатор для курсов преподавателя"""
-    image = serializers.SerializerMethodField()
-    students_count = serializers.SerializerMethodField()
-    rating = serializers.SerializerMethodField()
-    modules_count = serializers.SerializerMethodField()
-    category_name = serializers.SerializerMethodField()
-
-    def get_image(self, obj):
-        return get_course_image(obj, self.context)
-
-    class Meta:
-        model = Course
-        fields = [
-            'id', 'title', 'description', 'price', 'image',
-            'is_published', 'students_count', 'rating', 'modules_count',
-            'enable_certificate', 'category_name', 'created_at'
-        ]
-
-    def get_category_name(self, obj):
-        if obj.category_name:
-            return obj.category_name
-        if obj.category:
-            return obj.category.name
-        return None
-
-    def get_students_count(self, obj):
-        return obj.students_count
-
-    def get_rating(self, obj):
-        from django.db.models import Avg
-        avg = obj.reviews.aggregate(Avg('rating'))['rating__avg']
-        return round(avg, 1) if avg else None
-
-    def get_modules_count(self, obj):
-        return obj.modules.count()
-
-
-class CourseCreateSerializer(serializers.ModelSerializer):
-    """Сериализатор для создания/редактирования курса"""
-    image = serializers.SerializerMethodField()
-
-    def get_image(self, obj):
-        return get_course_image(obj, self.context)
-    category_id = serializers.IntegerField(required=False, allow_null=True)
-    category_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-
-    class Meta:
-        model = Course
-        fields = [
-            'id', 'title', 'description', 'price', 'image',
-            'category_id', 'category_name', 'is_published', 'enable_certificate', 'certificate_title'
-        ]
-
-    def create(self, validated_data):
-        category_id = validated_data.pop('category_id', None)
-        course = Course.objects.create(**validated_data)
-        if category_id:
-            course.category_id = category_id
-            course.save()
-        return course
-
-    def update(self, instance, validated_data):
-        category_id = validated_data.pop('category_id', None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        if category_id is not None:
-            instance.category_id = category_id
-        instance.save()
-        return instance
-
-
-class EnrollmentSerializer(serializers.ModelSerializer):
-    """Сериализатор для записи на курс"""
-    course = CourseListSerializer(read_only=True)
-
-    class Meta:
-        model = Enrollment
-        fields = ['id', 'course', 'enrolled_at']
-
-
-# ============================================================
-# МОДУЛИ
-# ============================================================
-
-class ModuleSerializer(serializers.ModelSerializer):
-    """Сериализатор для модулей"""
-    lessons_count = serializers.SerializerMethodField()
-    has_test = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Module
-        fields = [
-            'id', 'title', 'description', 'order',
-            'is_published', 'lessons_count', 'has_test', 'created_at'
-        ]
-
-    def get_lessons_count(self, obj):
-        return obj.lessons.count()
-
-    def get_has_test(self, obj):
-        return hasattr(obj, 'test')
-
-
-class ModuleCreateSerializer(serializers.ModelSerializer):
-    """Сериализатор для создания/редактирования модуля"""
-    class Meta:
-        model = Module
-        fields = ['id', 'title', 'description', 'order', 'is_published']
-
-
-class ModuleDetailSerializer(serializers.ModelSerializer):
-    """Детальный сериализатор модуля с уроками"""
-    lessons_count = serializers.SerializerMethodField()
-    lessons = serializers.SerializerMethodField()
-    has_test = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Module
-        fields = [
-            'id', 'title', 'description', 'order',
-            'is_published', 'lessons_count', 'lessons', 'has_test', 'created_at'
-        ]
-
-    def get_lessons_count(self, obj):
-        return obj.lessons.count()
-
-    def get_lessons(self, obj):
-        lessons = obj.lessons.all().order_by('order')
-        return LessonSerializer(lessons, many=True).data
-
-    def get_has_test(self, obj):
-        return hasattr(obj, 'test')
-
-
-# ============================================================
-# УРОКИ
-# ============================================================
-
-class LessonMaterialSerializer(serializers.ModelSerializer):
-    """Сериализатор для материалов урока"""
-    class Meta:
-        model = LessonMaterial
-        fields = ['id', 'title', 'file', 'file_type', 'uploaded_at']
-
-
-class LessonSerializer(serializers.ModelSerializer):
-    """Сериализатор для уроков"""
-    materials_count = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Lesson
-        fields = [
-            'id', 'title', 'description', 'video_url', 'order',
-            'duration_minutes', 'is_published', 'materials_count', 'created_at'
-        ]
-
-    def get_materials_count(self, obj):
-        return obj.materials.count()
-
-
-class LessonCreateSerializer(serializers.ModelSerializer):
-    """Сериализатор для создания/редактирования урока"""
-    class Meta:
-        model = Lesson
-        fields = [
-            'id', 'title', 'description', 'video_url', 'order',
-            'duration_minutes', 'is_published'
-        ]
-
-
-class LessonDetailSerializer(serializers.ModelSerializer):
-    """Детальный сериализатор урока с материалами"""
-    materials = LessonMaterialSerializer(many=True, read_only=True)
-    module_title = serializers.CharField(source='module.title', read_only=True)
-    course_id = serializers.IntegerField(source='module.course.id', read_only=True)
-
-    class Meta:
-        model = Lesson
-        fields = [
-            'id', 'title', 'description', 'video_url', 'order',
-            'duration_minutes', 'is_published', 'materials',
-            'module_title', 'course_id', 'created_at'
-        ]
-
-
-# ============================================================
-# ТЕСТЫ
-# ============================================================
+# ── Answers ──────────────────────────────────────────────────────────────────
 
 class AnswerSerializer(serializers.ModelSerializer):
-    """Сериализатор для вариантов ответа"""
     class Meta:
         model = Answer
         fields = ['id', 'text', 'is_correct', 'order']
 
 
-class AnswerStudentSerializer(serializers.ModelSerializer):
-    """Сериализатор для студента (без правильного ответа)"""
+class AnswerPublicSerializer(serializers.ModelSerializer):
+    """Without is_correct — for students during a test."""
     class Meta:
         model = Answer
         fields = ['id', 'text', 'order']
 
 
+# ── Questions ─────────────────────────────────────────────────────────────────
+
 class QuestionSerializer(serializers.ModelSerializer):
-    """Сериализатор для вопросов (для учителя)"""
     answers = AnswerSerializer(many=True, read_only=True)
 
     class Meta:
@@ -324,17 +37,7 @@ class QuestionSerializer(serializers.ModelSerializer):
         fields = ['id', 'text', 'question_type', 'order', 'points', 'answers']
 
 
-class QuestionStudentSerializer(serializers.ModelSerializer):
-    """Сериализатор вопросов для студента (без правильных ответов)"""
-    answers = AnswerStudentSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Question
-        fields = ['id', 'text', 'question_type', 'order', 'points', 'answers']
-
-
 class QuestionCreateSerializer(serializers.ModelSerializer):
-    """Сериализатор для создания вопроса"""
     answers = AnswerSerializer(many=True, required=False)
 
     class Meta:
@@ -344,132 +47,275 @@ class QuestionCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         answers_data = validated_data.pop('answers', [])
         question = Question.objects.create(**validated_data)
-        for answer_data in answers_data:
-            Answer.objects.create(question=question, **answer_data)
+        for ans in answers_data:
+            Answer.objects.create(question=question, **ans)
         return question
 
     def update(self, instance, validated_data):
         answers_data = validated_data.pop('answers', None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
+        for attr, val in validated_data.items():
+            setattr(instance, attr, val)
         instance.save()
-
         if answers_data is not None:
-            # Удаляем старые ответы и создаём новые
             instance.answers.all().delete()
-            for answer_data in answers_data:
-                Answer.objects.create(question=instance, **answer_data)
-
+            for ans in answers_data:
+                Answer.objects.create(question=instance, **ans)
         return instance
 
 
+class QuestionPublicSerializer(serializers.ModelSerializer):
+    answers = AnswerPublicSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Question
+        fields = ['id', 'text', 'question_type', 'order', 'points', 'answers']
+
+
+# ── Tests ──────────────────────────────────────────────────────────────────────
+
 class TestSerializer(serializers.ModelSerializer):
-    """Сериализатор для теста (для учителя)"""
-    questions_count = serializers.IntegerField(read_only=True)
+    questions_count = serializers.ReadOnlyField()
     questions = QuestionSerializer(many=True, read_only=True)
 
     class Meta:
         model = Test
         fields = [
-            'id', 'title', 'description', 'passing_score',
-            'time_limit_minutes', 'attempts_allowed', 'is_published',
-            'questions_count', 'questions', 'created_at'
+            'id', 'title', 'description', 'passing_score', 'time_limit_minutes',
+            'attempts_allowed', 'is_published', 'questions_count', 'questions', 'created_at',
         ]
 
 
 class TestCreateSerializer(serializers.ModelSerializer):
-    """Сериализатор для создания/редактирования теста"""
     class Meta:
         model = Test
-        fields = [
-            'id', 'title', 'description', 'passing_score',
-            'time_limit_minutes', 'attempts_allowed', 'is_published'
-        ]
+        fields = ['title', 'description', 'passing_score', 'time_limit_minutes', 'attempts_allowed', 'is_published']
 
 
 class TestStudentSerializer(serializers.ModelSerializer):
-    """Сериализатор теста для студента"""
-    questions_count = serializers.IntegerField(read_only=True)
-    questions = QuestionStudentSerializer(many=True, read_only=True)
+    """Test for student — questions without correct answer flags."""
+    questions_count = serializers.ReadOnlyField()
+    questions = QuestionPublicSerializer(many=True, read_only=True)
 
     class Meta:
         model = Test
         fields = [
-            'id', 'title', 'description', 'passing_score',
-            'time_limit_minutes', 'attempts_allowed',
-            'questions_count', 'questions'
+            'id', 'title', 'description', 'passing_score', 'time_limit_minutes',
+            'attempts_allowed', 'questions_count', 'questions',
         ]
 
 
-# ============================================================
-# ПРОГРЕСС
-# ============================================================
+# ── LessonMaterial ────────────────────────────────────────────────────────────
+
+class LessonMaterialSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LessonMaterial
+        fields = ['id', 'title', 'file', 'file_type', 'uploaded_at']
+
+
+# ── Lessons ───────────────────────────────────────────────────────────────────
+
+class LessonSerializer(serializers.ModelSerializer):
+    materials_count = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Lesson
+        fields = [
+            'id', 'title', 'description', 'video_url', 'order',
+            'duration_minutes', 'is_published', 'materials_count', 'created_at',
+        ]
+
+
+class LessonCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Lesson
+        fields = ['title', 'description', 'video_url', 'order', 'duration_minutes', 'is_published']
+
+
+class LessonDetailSerializer(serializers.ModelSerializer):
+    materials_count = serializers.ReadOnlyField()
+    materials = LessonMaterialSerializer(many=True, read_only=True)
+    module_title = serializers.SerializerMethodField()
+    course_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Lesson
+        fields = [
+            'id', 'title', 'description', 'video_url', 'order',
+            'duration_minutes', 'is_published', 'materials_count', 'materials',
+            'module_title', 'course_id', 'created_at',
+        ]
+
+    def get_module_title(self, obj):
+        return obj.module.title
+
+    def get_course_id(self, obj):
+        return obj.module.course_id
+
+
+# ── Modules ───────────────────────────────────────────────────────────────────
+
+class ModuleSerializer(serializers.ModelSerializer):
+    lessons_count = serializers.ReadOnlyField()
+    has_test = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Module
+        fields = ['id', 'title', 'description', 'order', 'is_published', 'lessons_count', 'has_test', 'created_at']
+
+
+class ModuleCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Module
+        fields = ['title', 'description', 'order', 'is_published']
+
+
+class ModuleDetailSerializer(serializers.ModelSerializer):
+    lessons_count = serializers.ReadOnlyField()
+    has_test = serializers.ReadOnlyField()
+    lessons = LessonDetailSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Module
+        fields = [
+            'id', 'title', 'description', 'order', 'is_published',
+            'lessons_count', 'has_test', 'lessons', 'created_at',
+        ]
+
+
+# ── Courses ───────────────────────────────────────────────────────────────────
+
+class CourseListSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.ReadOnlyField()
+    students_count = serializers.ReadOnlyField()
+    rating = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Course
+        fields = [
+            'id', 'title', 'description', 'price', 'image',
+            'teacher_name', 'category_name', 'students_count', 'rating',
+            'is_published', 'created_at',
+        ]
+
+
+class TeacherCourseSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.ReadOnlyField()
+    students_count = serializers.ReadOnlyField()
+    rating = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Course
+        fields = [
+            'id', 'title', 'description', 'price', 'image',
+            'teacher_name', 'category_name', 'students_count', 'rating',
+            'is_published', 'enable_certificate', 'certificate_title', 'created_at',
+        ]
+
+
+class CourseDetailSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.ReadOnlyField()
+    students_count = serializers.ReadOnlyField()
+    rating = serializers.ReadOnlyField()
+    modules_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Course
+        fields = [
+            'id', 'title', 'description', 'price', 'image',
+            'teacher_name', 'category_name', 'students_count', 'rating',
+            'is_published', 'enable_certificate', 'modules_count', 'created_at',
+        ]
+
+    def get_modules_count(self, obj):
+        return obj.modules.count()
+
+
+class CourseCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Course
+        fields = [
+            'title', 'description', 'price', 'category', 'category_name',
+            'is_published', 'enable_certificate', 'certificate_title',
+        ]
+
+
+# ── Enrollments ───────────────────────────────────────────────────────────────
+
+class EnrollmentSerializer(serializers.ModelSerializer):
+    course = CourseListSerializer(read_only=True)
+
+    class Meta:
+        model = Enrollment
+        fields = ['id', 'course', 'enrolled_at']
+
+
+# ── Progress ──────────────────────────────────────────────────────────────────
 
 class LessonProgressSerializer(serializers.ModelSerializer):
-    """Сериализатор прогресса по уроку"""
-    lesson_title = serializers.CharField(source='lesson.title', read_only=True)
-
     class Meta:
         model = LessonProgress
-        fields = ['id', 'lesson', 'lesson_title', 'is_completed', 'completed_at', 'watch_time_seconds']
-        read_only_fields = ['completed_at']
+        fields = ['id', 'lesson', 'is_completed', 'completed_at', 'watch_time_seconds']
 
 
-class TestAttemptSerializer(serializers.ModelSerializer):
-    """Сериализатор попытки теста"""
-    test_title = serializers.CharField(source='test.title', read_only=True)
+class CourseProgressSerializer(serializers.Serializer):
+    course_id = serializers.IntegerField()
+    course_title = serializers.CharField()
+    total_lessons = serializers.IntegerField()
+    completed_lessons = serializers.IntegerField()
+    progress_percent = serializers.FloatField()
+    modules = serializers.ListField()
 
-    class Meta:
-        model = TestAttempt
-        fields = [
-            'id', 'test', 'test_title', 'score', 'is_passed',
-            'started_at', 'finished_at'
-        ]
 
+# ── Test Attempts ─────────────────────────────────────────────────────────────
 
 class TestAnswerSerializer(serializers.ModelSerializer):
-    """Сериализатор ответа студента"""
     class Meta:
         model = TestAnswer
         fields = ['id', 'question', 'selected_answers', 'is_correct']
 
 
-class CourseProgressSerializer(serializers.Serializer):
-    """Сериализатор общего прогресса по курсу"""
-    course_id = serializers.IntegerField()
-    course_title = serializers.CharField()
-    total_lessons = serializers.IntegerField()
-    completed_lessons = serializers.IntegerField()
-    progress_percent = serializers.IntegerField()
-    modules = serializers.ListField()
+class TestAttemptSerializer(serializers.ModelSerializer):
+    test_title = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TestAttempt
+        fields = ['id', 'test', 'test_title', 'score', 'is_passed', 'started_at', 'finished_at']
+
+    def get_test_title(self, obj):
+        return obj.test.title
 
 
-# ============================================================
-# СЕРТИФИКАТЫ
-# ============================================================
+# ── Certificates ──────────────────────────────────────────────────────────────
 
 class CertificateSerializer(serializers.ModelSerializer):
-    """Сериализатор сертификата"""
-    student_name = serializers.CharField(source='student.name', read_only=True)
-    course_title = serializers.CharField(source='course.title', read_only=True)
+    student_name = serializers.SerializerMethodField()
+    course_title = serializers.SerializerMethodField()
 
     class Meta:
         model = Certificate
-        fields = [
-            'id', 'certificate_number', 'student_name', 'course_title',
-            'issued_at', 'pdf_file'
-        ]
+        fields = ['id', 'certificate_number', 'student_name', 'course_title', 'issued_at', 'pdf_file']
+
+    def get_student_name(self, obj):
+        return obj.student.name
+
+    def get_course_title(self, obj):
+        return obj.course.title
 
 
 class CertificateVerifySerializer(serializers.ModelSerializer):
-    """Сериализатор для публичной проверки сертификата"""
-    student_name = serializers.CharField(source='student.name', read_only=True)
-    course_title = serializers.CharField(source='course.title', read_only=True)
-    teacher_name = serializers.CharField(source='course.teacher.name', read_only=True)
+    student_name = serializers.SerializerMethodField()
+    course_title = serializers.SerializerMethodField()
+    teacher_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Certificate
-        fields = [
-            'certificate_number', 'student_name', 'course_title',
-            'teacher_name', 'issued_at'
-        ]
+        fields = ['certificate_number', 'student_name', 'course_title', 'teacher_name', 'issued_at']
+
+    def get_student_name(self, obj):
+        return obj.student.name
+
+    def get_course_title(self, obj):
+        return obj.course.title
+
+    def get_teacher_name(self, obj):
+        return obj.course.teacher.name

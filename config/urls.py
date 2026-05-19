@@ -17,6 +17,9 @@ urlpatterns = [
     # Все запросы начинающиеся с /api/users/ идут в users/urls.py
     path('api/users/', include('users.urls')),
 
+    # WebAuthn / Passkey endpoints — /api/auth/passkey/...
+    path('api/auth/', include('users.passkey_urls')),
+
     # Все запросы начинающиеся с /api/courses/ идут в courses/urls.py
     path('api/courses/', include('courses.urls')),
 ]

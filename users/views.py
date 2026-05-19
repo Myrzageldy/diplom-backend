@@ -26,16 +26,17 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken  # noqa: F811
 from django.core.mail import send_mail
 from django.core import signing
 from django.conf import settings
 
 from .serializers import (
     RegisterSerializer, LoginSerializer, UserSerializer,
-    SendCodeSerializer, VerifyCodeSerializer
+    SendCodeSerializer, VerifyCodeSerializer, WebAuthnCredentialSerializer,
 )
-from .models import EmailVerification, PasswordResetToken
+from .models import EmailVerification, PasswordResetToken, WebAuthnCredential
+from .services import webauthn as webauthn_service
 from .throttles import (
     LoginRateThrottle,
     SendCodeRateThrottle,
@@ -633,7 +634,9 @@ class PasswordResetConfirmView(APIView):
 
         user = token_obj.user
         user.set_password(password)
-        user.save(update_fields=['password'])
+        user.login_attempts = 0
+        user.locked_until = None
+        user.save(update_fields=['password', 'login_attempts', 'locked_until'])
 
         # Удаляем токен после использования
         token_obj.delete()
@@ -687,3 +690,281 @@ class DeleteAccountView(APIView):
         logger.info('DeleteAccount: user=%s', email)
 
         return Response({'message': 'Аккаунт удалён'}, status=status.HTTP_200_OK)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEBAUTHN / PASSKEY — аутентификация без пароля
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get_client_ip_from_request(request) -> str:
+    """Извлекает реальный IP клиента из заголовков запроса."""
+    x_forwarded = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded:
+        return x_forwarded.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR', '0.0.0.0')
+
+
+class PasskeyRegisterBeginView(APIView):
+    """
+    POST /api/auth/passkey/register/begin/
+
+    Шаг 1 регистрации passkey. Требует аутентификации (JWT Bearer).
+
+    Принимает JSON (опционально):
+    {
+        "name": "Ноут Windows"   // человекочитаемое имя ключа
+    }
+
+    Возвращает PublicKeyCredentialCreationOptions для передачи в
+    navigator.credentials.create(). Также возвращает session_id
+    для использования на шаге 2.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        result = webauthn_service.begin_registration(request.user)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class PasskeyRegisterCompleteView(APIView):
+    """
+    POST /api/auth/passkey/register/complete/
+
+    Шаг 2 регистрации passkey. Верифицирует ответ аутентификатора.
+
+    Принимает JSON:
+    {
+        "session_id": "abc123...",         // из шага begin
+        "name": "Ноут Windows",            // название ключа
+        "credential": {                    // ответ от navigator.credentials.create()
+            "id": "base64url...",
+            "rawId": "base64url...",
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": "base64url...",
+                "attestationObject": "base64url...",
+                "transports": ["internal"]
+            }
+        }
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        session_id = request.data.get('session_id', '').strip()
+        credential_data = request.data.get('credential')
+        name = request.data.get('name', 'Мой Passkey').strip()
+
+        if not session_id or not credential_data:
+            return Response(
+                {'detail': 'Требуются поля session_id и credential'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            cred = webauthn_service.complete_registration(
+                user=request.user,
+                session_id=session_id,
+                credential_data=credential_data,
+                name=name or 'Мой Passkey',
+            )
+        except ValueError as exc:
+            logger.warning(
+                'Passkey registration failed: user=%s error=%s',
+                request.user.email, str(exc),
+            )
+            return Response(
+                {'detail': str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                'message': 'Passkey успешно добавлен',
+                'passkey': WebAuthnCredentialSerializer(cred).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PasskeyLoginBeginView(APIView):
+    """
+    POST /api/auth/passkey/login/begin/
+
+    Шаг 1 входа через passkey. Публичный эндпоинт (не требует JWT).
+
+    Принимает JSON (опционально):
+    {
+        "email": "user@example.com"    // если не указан — discoverable flow
+    }
+
+    Режим discoverable: браузер сам определяет доступные passkeys
+    и показывает пикер (Windows Hello dialog с выбором аккаунта).
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = request.data.get('email', '').strip().lower() or None
+        result = webauthn_service.begin_login(email=email)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class PasskeyLoginCompleteView(APIView):
+    """
+    POST /api/auth/passkey/login/complete/
+
+    Шаг 2 входа. Верифицирует подпись и выдаёт JWT-токены.
+
+    Принимает JSON:
+    {
+        "session_id": "abc123...",         // из шага begin
+        "credential": {                    // ответ от navigator.credentials.get()
+            "id": "base64url...",
+            "rawId": "base64url...",
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": "base64url...",
+                "authenticatorData": "base64url...",
+                "signature": "base64url...",
+                "userHandle": "base64url..."   // необязательно (discoverable)
+            }
+        }
+    }
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        session_id = request.data.get('session_id', '').strip()
+        credential_data = request.data.get('credential')
+
+        if not session_id or not credential_data:
+            return Response(
+                {'detail': 'Требуются поля session_id и credential'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ip = _get_client_ip_from_request(request)
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+
+        try:
+            user = webauthn_service.complete_login(
+                session_id=session_id,
+                credential_data=credential_data,
+                ip=ip,
+                user_agent=user_agent,
+            )
+        except ValueError as exc:
+            return Response(
+                {'detail': str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Проверяем активность аккаунта
+        if not user.is_active:
+            return Response(
+                {'detail': 'Аккаунт деактивирован'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Сбрасываем счётчик неудачных попыток (как после обычного входа)
+        user.reset_login_attempts()
+
+        # Выдаём JWT-токены (тот же механизм, что и при обычном входе)
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                'message': 'Вход через Passkey выполнен успешно',
+                'user': UserSerializer(user).data,
+                'tokens': {
+                    'access': str(refresh.access_token),
+                    'refresh': str(refresh),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class PasskeyListView(APIView):
+    """
+    GET    /api/auth/passkey/  — список passkey текущего пользователя
+    DELETE /api/auth/passkey/  — удаление passkey по id в теле запроса
+
+    Требует: Authorization: Bearer <access_token>
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        credentials = request.user.webauthn_credentials.all()
+        serializer = WebAuthnCredentialSerializer(credentials, many=True)
+        return Response(serializer.data)
+
+    def delete(self, request):
+        """Удаление passkey по id (UUID)."""
+        passkey_id = request.data.get('id')
+        if not passkey_id:
+            return Response(
+                {'detail': 'Требуется поле id'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        deleted, _ = WebAuthnCredential.objects.filter(
+            id=passkey_id,
+            user=request.user,  # пользователь может удалить только свои ключи
+        ).delete()
+
+        if deleted == 0:
+            return Response(
+                {'detail': 'Passkey не найден'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        logger.info('Passkey deleted: user=%s id=%s', request.user.email, passkey_id)
+        return Response({'message': 'Passkey удалён'}, status=status.HTTP_200_OK)
+
+
+class PasskeyDetailView(APIView):
+    """
+    PATCH /api/auth/passkey/<id>/  — переименование passkey
+
+    Принимает JSON:
+    {
+        "name": "Новое название"
+    }
+
+    Требует: Authorization: Bearer <access_token>
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, passkey_id: str):
+        name = request.data.get('name', '').strip()
+        if not name:
+            return Response(
+                {'detail': 'Название не может быть пустым'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(name) > 100:
+            return Response(
+                {'detail': 'Название слишком длинное (максимум 100 символов)'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            cred = WebAuthnCredential.objects.get(
+                id=passkey_id,
+                user=request.user,
+            )
+        except WebAuthnCredential.DoesNotExist:
+            return Response(
+                {'detail': 'Passkey не найден'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        cred.name = name
+        cred.save(update_fields=['name'])
+
+        return Response(
+            {
+                'message': 'Название обновлено',
+                'passkey': WebAuthnCredentialSerializer(cred).data,
+            }
+        )

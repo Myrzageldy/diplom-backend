@@ -1,3 +1,5 @@
+import io
+
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -5,6 +7,8 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Count, Avg
 from django.shortcuts import get_object_or_404
+from django.http import FileResponse, Http404
+from django.core.files.base import ContentFile
 
 from django.utils import timezone
 from .models import (
@@ -1112,11 +1116,19 @@ class CertificateView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-        # Создаём сертификат
+        # Создаём сертификат и генерируем PDF
         certificate = Certificate.objects.create(
             student=request.user,
             course=course
         )
+
+        try:
+            from .certificate_generator import generate_certificate_pdf
+            pdf_buffer = generate_certificate_pdf(certificate)
+            filename = f'certificate_{certificate.certificate_number}.pdf'
+            certificate.pdf_file.save(filename, ContentFile(pdf_buffer.read()), save=True)
+        except Exception:
+            pass  # сертификат создан, PDF сгенерируем при скачивании
 
         serializer = CertificateSerializer(certificate)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -1426,3 +1438,52 @@ class PaymentStatusView(APIView):
             'amount': float(payment.amount),
             'course_title': payment.course.title,
         })
+
+
+class CertificateDownloadView(APIView):
+    """
+    GET /api/certificates/<number>/download/
+    Скачать PDF-сертификат (только владелец).
+    Если PDF ещё не сгенерирован — генерируем на лету.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, number):
+        try:
+            certificate = Certificate.objects.select_related('student', 'course__teacher').get(
+                certificate_number=number,
+                student=request.user,
+            )
+        except Certificate.DoesNotExist:
+            raise Http404
+
+        # Если PDF уже есть — отдаём файл
+        if certificate.pdf_file:
+            try:
+                response = FileResponse(
+                    certificate.pdf_file.open('rb'),
+                    content_type='application/pdf',
+                )
+                response['Content-Disposition'] = (
+                    f'attachment; filename="certificate_{number}.pdf"'
+                )
+                return response
+            except Exception:
+                pass
+
+        # Генерируем PDF на лету и сохраняем
+        from .certificate_generator import generate_certificate_pdf
+        from django.core.files.base import ContentFile
+
+        pdf_buffer = generate_certificate_pdf(certificate)
+        pdf_bytes = pdf_buffer.read()
+
+        filename = f'certificate_{number}.pdf'
+        certificate.pdf_file.save(filename, ContentFile(pdf_bytes), save=True)
+
+        response = FileResponse(
+            io.BytesIO(pdf_bytes),
+            content_type='application/pdf',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response

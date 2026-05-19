@@ -168,6 +168,114 @@ class EmailVerification(models.Model):
         return timezone.now() > self.created_at + timedelta(minutes=10)
 
 
+class WebAuthnCredential(models.Model):
+    """
+    WebAuthn/Passkey учётные данные пользователя.
+
+    Один пользователь может иметь несколько passkey:
+    встроенный аутентификатор (Windows Hello, Touch ID) и/или
+    внешний USB/NFC/Bluetooth ключ безопасности (YubiKey и др.).
+
+    Принцип хранения:
+    - credential_id — уникальный идентификатор, выданный аутентификатором
+    - public_key    — публичный ключ COSE для проверки подписей
+    - sign_count    — монотонный счётчик, защищает от клонирования ключа
+    """
+    DEVICE_TYPE_CHOICES = [
+        ('platform', 'Встроенный (Windows Hello, Touch ID, Face ID)'),
+        ('cross-platform', 'Внешний (USB, NFC, Bluetooth)'),
+    ]
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+        verbose_name='UUID'
+    )
+    user = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='webauthn_credentials',
+        verbose_name='Пользователь'
+    )
+    # Уникальный идентификатор ключа (выдаётся аутентификатором при регистрации)
+    credential_id = models.BinaryField(
+        unique=True,
+        db_index=True,
+        verbose_name='ID учётных данных'
+    )
+    # COSE-публичный ключ для верификации подписей (CBOR-формат)
+    public_key = models.BinaryField(verbose_name='Публичный ключ (COSE/CBOR)')
+    # Счётчик подписей — каждый раз увеличивается при использовании
+    sign_count = models.PositiveBigIntegerField(
+        default=0,
+        verbose_name='Счётчик подписей'
+    )
+    # Список транспортных протоколов: ["internal"], ["usb"], ["nfc","ble"] и т.д.
+    transports = models.JSONField(default=list, verbose_name='Транспортные протоколы')
+    name = models.CharField(
+        max_length=100,
+        default='Мой Passkey',
+        verbose_name='Название ключа'
+    )
+    device_type = models.CharField(
+        max_length=20,
+        choices=DEVICE_TYPE_CHOICES,
+        default='platform',
+        verbose_name='Тип устройства'
+    )
+    # backed_up = True означает, что ключ синхронизируется между устройствами (iCloud, Google)
+    backed_up = models.BooleanField(default=False, verbose_name='Синхронизирован в облаке')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата добавления')
+    last_used_at = models.DateTimeField(null=True, blank=True, verbose_name='Последнее использование')
+
+    class Meta:
+        verbose_name = 'WebAuthn / Passkey'
+        verbose_name_plural = 'WebAuthn / Passkeys'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.user.email} — {self.name}'
+
+
+class PasskeyLoginLog(models.Model):
+    """
+    Журнал попыток входа через Passkey.
+
+    Записывает каждую попытку (успешную и неудачную) для:
+    - аудита безопасности
+    - обнаружения атак клонирования ключа
+    - расследования инцидентов
+    """
+    user = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='passkey_login_logs',
+        verbose_name='Пользователь'
+    )
+    ip = models.GenericIPAddressField(verbose_name='IP адрес')
+    user_agent = models.TextField(blank=True, verbose_name='User-Agent браузера')
+    success = models.BooleanField(verbose_name='Успешно')
+    error_message = models.CharField(
+        max_length=500,
+        blank=True,
+        verbose_name='Сообщение об ошибке'
+    )
+    timestamp = models.DateTimeField(auto_now_add=True, verbose_name='Время попытки')
+
+    class Meta:
+        verbose_name = 'Лог входа Passkey'
+        verbose_name_plural = 'Логи входов Passkey'
+        ordering = ['-timestamp']
+
+    def __str__(self) -> str:
+        status = 'OK' if self.success else 'FAIL'
+        user_str = self.user.email if self.user else 'unknown'
+        return f'[{status}] {user_str} @ {self.ip} — {self.timestamp:%Y-%m-%d %H:%M}'
+
+
 class PasswordResetToken(models.Model):
     """
     Токен для сброса пароля.

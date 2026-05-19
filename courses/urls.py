@@ -29,7 +29,7 @@ from .views import (
     TestStartView, TestSubmitView, TestResultsView,
 
     # Сертификаты
-    CertificateView, MyCertificatesView, VerifyCertificateView,
+    CertificateView, MyCertificatesView, VerifyCertificateView, CertificateDownloadView,
 
     # Обучение
     StudentLessonView,
@@ -107,4 +107,5 @@ urlpatterns = [
     path('<int:pk>/certificate/', CertificateView.as_view(), name='course-certificate'),
     path('certificates/', MyCertificatesView.as_view(), name='my-certificates'),
     path('certificates/<str:number>/verify/', VerifyCertificateView.as_view(), name='verify-certificate'),
+    path('certificates/<str:number>/download/', CertificateDownloadView.as_view(), name='certificate-download'),
 ]
